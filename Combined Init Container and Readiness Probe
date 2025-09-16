@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-safe-start
+spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox
+      command: ['sh', '-c', 'until nc -z db-service 5432; do echo "waiting for db"; sleep 2; done']
+  containers:
+    - name: my-app
+      image: my-app-image
+      ports:
+        - containerPort: 8080
+      readinessProbe:
+        exec:
+          command:
+            - sh
+            - -c
+            - "nc -z db-service 5432"
+        initialDelaySeconds: 5
+        periodSeconds: 5
+
+# Init container:
+# Waits until db-service:5432 is reachable
+# Blocks the main app from starting prematurely
+
+#Readiness probe:
+#Continues to verify DB connectivity after the app has started
+#Ensures the pod does not get traffic from Services until it’s fully ready
