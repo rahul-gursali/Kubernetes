@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+  - name: main-app
+    image: myapp:latest
+    volumeMounts:
+    - name: shared-logs
+      mountPath: /var/log/app
+  - name: log-collector
+    image: fluentd:latest
+    volumeMounts:
+    - name: shared-logs
+      mountPath: /logs
+  volumes:
+  - name: shared-logs
+    emptyDir: {}
