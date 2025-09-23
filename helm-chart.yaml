@@ -1,0 +1,253 @@
+helm-charts/
+├── charts/
+│   └── payment-service/
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       ├── values-dev.yaml
+│       ├── values-staging.yaml
+│       ├── values-prod.yaml
+│       ├── templates/
+│       │   ├── deployment.yaml
+│       │   ├── service.yaml
+│       │   ├── ingress.yaml
+│       │   ├── configmap.yaml
+│       │   ├── secret.yaml
+│       │   └── _helpers.tpl
+│       ├── ci/
+│       │   └── helm-deploy.yaml
+│       └── README.md
+└── .gitignore
+
+---------------------------------------------------------------------
+#chart.yaml
+apiVersion: v2
+name: payment-service
+description: Helm chart for Payment Service microservice
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+----------------------------------------------------------------------
+#values.yaml
+replicaCount: 2
+
+image:
+  repository: myregistry.com/payment-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: payment.dev.company.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+config:
+  DATABASE_URL: "postgres://user:password@db:5432/paymentdb"
+
+secrets:
+  API_KEY: "changeme"
+
+  ------------------------------------------------------------------------------------------
+
+  #values-dev.yaml
+
+  replicaCount: 1
+image:
+  tag: dev-latest
+ingress:
+  hosts:
+    - host: payment.dev.company.com
+---------------------------------------------------------------------------------------------
+
+#values-staging.yaml
+
+replicaCount: 2
+image:
+  tag: staging-latest
+ingress:
+  hosts:
+    - host: payment.staging.company.com
+----------------------------------------------------------------------------------------------
+
+#values-prod.yaml
+
+replicaCount: 4
+image:
+  tag: stable
+resources:
+  limits:
+    cpu: 1
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+ingress:
+  hosts:
+    - host: payment.company.com
+-----------------------------------------------------------------------------------------------
+
+#templates/deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "payment-service.fullname" . }}
+  labels:
+    app: {{ include "payment-service.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "payment-service.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "payment-service.name" . }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "payment-service.fullname" . }}-config
+            - secretRef:
+                name: {{ include "payment-service.fullname" . }}-secrets
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+----------------------------------------------------------------------------------------------------
+
+#templates/service.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "payment-service.fullname" . }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: {{ include "payment-service.name" . }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+----------------------------------------------------------------------------------------------------
+
+#templates/ingress.yaml
+
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "payment-service.fullname" . }}
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.ingress.className }}
+spec:
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "payment-service.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+----------------------------------------------------------------------------------------------
+
+#templates/configmap.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "payment-service.fullname" . }}-config
+data:
+{{- range $key, $value := .Values.config }}
+  {{ $key }}: "{{ $value }}"
+{{- end }}
+---------------------------------------------------------------------------------------------
+
+#templates/secret.yaml
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "payment-service.fullname" . }}-secrets
+type: Opaque
+stringData:
+{{- range $key, $value := .Values.secrets }}
+  {{ $key }}: "{{ $value }}"
+{{- end }}
+--------------------------------------------------------------------------------------------
+
+templates/_helpers.tpl
+
+{{- define "payment-service.name" -}}
+{{ .Chart.Name }}
+{{- end }}
+
+{{- define "payment-service.fullname" -}}
+{{ include "payment-service.name" . }}-{{ .Release.Name }}
+{{- end }}
+----------------------------------------------------------------------------------------------
+
+#CI/helm-deploy.yaml ( Github Actions )
+
+name: Deploy Payment Service
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install payment-service ./charts/payment-service \
+            --namespace=production \
+            -f ./charts/payment-service/values-prod.yaml \
+            --set image.tag=${{ github.sha }}
+-----------------------------------------------------------------------------------------------------------------
+
+#README.md
+
+# Payment Service Helm Chart
+
+This Helm chart deploys the **Payment Service** microservice on Kubernetes.
+
+## Installation
+```bash
+helm upgrade --install payment-service ./charts/payment-service -f values-dev.yaml
+--------------------------------------------------------------------------------------------------------------------
+
+
