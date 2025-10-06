@@ -1,0 +1,99 @@
+# Download istioctl
+curl -L https://istio.io/downloadIstio | sh -
+cd istio-*
+export PATH=$PWD/bin:$PATH
+
+# Verify
+istioctl version
+kubectl version --short
+
+#Install Istio control plane
+# Demo 
+istioctl install --set profile=demo -y
+
+# Or for smaller/default profile
+istioctl install --set profile=default -y
+
+#Enable automatic sidecar injection for your app namespace
+# If already labeled, you can patch or re-label accordingly
+kubectl create namespace demo
+kubectl label namespace demo istio-injection=enabled
+
+#Deploy a sample app
+kubectl apply -n demo -f samples/bookinfo/platform/kube/bookinfo.yaml
+kubectl get svc,pods -n demo
+
+#Expose app via Istio Ingress Gateway
+
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: demo-gateway
+  namespace: demo
+spec:
+  selector:
+    istio: ingressgateway          # use Istio's ingress gateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+
+
+#VirtualService
+
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: demo-route
+  namespace: demo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - demo-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: productpage.demo.svc.cluster.local
+        port:
+          number: 9080
+
+
+#apply above
+
+kubectl apply -f gateway.yaml
+kubectl apply -f virtualservice.yaml
+kubectl get gateway -n demo
+kubectl get virtualservice -n demo
+
+
+#DestinationRule
+#Use VirtualService for routing rules ( like Canary ) and DestinationRule to configure policies like Load Balancing 
+
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: productpage-dr
+  namespace: demo
+spec:
+  host: productpage
+  trafficPolicy:
+    loadBalancer:
+      simple: ROUND_ROBIN
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+        maxRequestsPerConnection: 100
+
+
+
+
+
