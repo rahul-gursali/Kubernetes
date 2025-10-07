@@ -22,7 +22,7 @@ kubectl label namespace demo istio-injection=enabled
 #Deploy a sample app
 kubectl apply -n demo -f samples/bookinfo/platform/kube/bookinfo.yaml
 kubectl get svc,pods -n demo
-
+--------------------------------------------------------------------------------------------------------
 #Expose app via Istio Ingress Gateway
 
 apiVersion: networking.istio.io/v1alpha3
@@ -40,7 +40,7 @@ spec:
       protocol: HTTP
     hosts:
     - "*"
-
+--------------------------------------------------------------------------------------------------------
 
 #VirtualService
 
@@ -71,7 +71,7 @@ kubectl apply -f gateway.yaml
 kubectl apply -f virtualservice.yaml
 kubectl get gateway -n demo
 kubectl get virtualservice -n demo
-
+--------------------------------------------------------------------------------------------------------
 
 #DestinationRule
 #Use VirtualService for routing rules ( like Canary ) and DestinationRule to configure policies like Load Balancing 
@@ -92,6 +92,64 @@ spec:
       http:
         http1MaxPendingRequests: 100
         maxRequestsPerConnection: 100
+--------------------------------------------------------------------------------------------------------
+
+#Enable mTLS (for service-to-service communication) — PeerAuthentication + DestinationRule
+#Istio’s security uses PeerAuthentication (what inbound accepts) and DestinationRule (what outbound sends)
+
+# Require inbound mTLS
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: demo
+spec:
+  mtls:
+    mode: STRICT
+--------------------------------------------------------------------------------------------------------
+
+#DestinationRule for TLS settings for egress
+
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: mtls-for-svc
+  namespace: demo
+spec:
+  host: some-service
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+--------------------------------------------------------------------------------------------------------
+
+#Observability: Kiali, Prometheus, Grafana, Jaeger
+# Example: port-forward Kiali
+kubectl -n istio-system port-forward svc/kiali 20001:20001
+# Prometheus
+kubectl -n istio-system port-forward svc/prometheus 9090:9090
+--------------------------------------------------------------------------------------------------------
+
+#Canary / traffic shifting example
+
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: productpage
+  namespace: demo
+spec:
+  hosts:
+  - productpage
+  http:
+  - route:
+    - destination:
+        host: productpage
+        subset: v1
+      weight: 90
+    - destination:
+        host: productpage
+        subset: v2
+      weight: 10
+
 
 
 
