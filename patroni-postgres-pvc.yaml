@@ -1,0 +1,179 @@
+# setup for HA database with 1 pod as leader and 2 replica with sync and auto failover.
+
+
+# ConfigMap: Patroni Configuration
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: patroni-config
+data:
+  patroni.yml: |
+    bootstrap:
+      dcs:
+        postgresql:
+          parameters:
+            max_connections: 100
+            shared_buffers: 128MB
+          use_pg_rewind: true
+          use_slots: true
+        slots:
+          wal_keep_segments: 8
+      initdb:
+      - encoding: UTF8
+      - data-checksums
+      pg_hba:
+      - host all all 0.0.0.0/0 md5
+      users:
+        admin:
+          password: admin
+          options:
+          - createrole
+          - createdb
+    restapi:
+      listen: 0.0.0.0:8008
+      connect_address: "{POD_IP}:8008"
+    postgresql:
+      listen: 0.0.0.0:5432
+      connect_address: "{POD_IP}:5432"
+      data_dir: /var/lib/postgresql/data
+      authentication:
+        replication:
+          username: replicator
+          password: repl_pass
+        superuser:
+          username: postgres
+          password: postgres
+    kubernetes:
+      namespace: default
+      labels:
+        application: patroni
+      use_endpoints: true
+---
+
+# StorageClass (Optional - only if you don’t have one)
+# Uncomment this section if your cluster does not already have a default StorageClass.
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: standard
+provisioner: kubernetes.io/aws-ebs # or gce-pd, dobs, etc.
+parameters:
+  type: gp2
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+---
+
+# StatefulSet with PVC
+# Pod identity maintained by StatefulSet
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: patroni
+spec:
+  serviceName: patroni
+  replicas: 3
+  selector:
+    matchLabels:
+      app: patroni
+  template:
+    metadata:
+      labels:
+        app: patroni
+    spec:
+      serviceAccountName: default
+      containers:
+        - name: postgres
+          image: registry.opensource.zalan.do/acid/spilo-15:2.1-p7
+          ports:
+            - containerPort: 5432
+            - containerPort: 8008
+          env:
+            - name: PATRONI_KUBERNETES_LABELS
+              value: "application: patroni"
+            - name: PATRONI_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PATRONI_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PATRONI_SCOPE
+              value: patroni
+            - name: PATRONI_CONFIGURATION
+              valueFrom:
+                configMapKeyRef:
+                  name: patroni-config
+                  key: patroni.yml
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        storageClassName: standard   # Adjust to your cluster's StorageClass
+        resources:
+          requests:
+            storage: 5Gi
+---
+
+# Headless Service (for internal communication)
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni
+spec:
+  clusterIP: None
+  selector:
+    app: patroni
+  ports:
+    - name: postgresql
+      port: 5432
+    - name: api
+      port: 8008
+---
+
+# Primary Service
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni-primary
+spec:
+  selector:
+    role: master
+  ports:
+    - name: postgresql
+      port: 5432
+---
+
+# Replica Service
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni-replicas
+spec:
+  selector:
+    role: replica
+  ports:
+    - name: postgresql
+      port: 5432
+
+
+# kubectl apply -f patroni-postgres-pvc.yaml
+# kubectl get pods -l app=patroni
+# kubectl get pvc
+
+# We will see 3 pods are running and 3 PVCs auto created .
+
