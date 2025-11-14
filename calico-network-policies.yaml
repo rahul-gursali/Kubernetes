@@ -1,0 +1,328 @@
+# Repo structure
+
+network-policies/
+├─ global/
+│  ├─ allow-dns.yaml
+│  ├─ allow-kube-system.yaml
+│  ├─ log-denied.yaml
+│  └─ global-default-deny.yaml
+├─ namespaces/
+│  ├─ web/
+│  │  ├─ ns-allow-intra.yaml
+│  │  ├─ frontend-allow-lb.yaml
+│  │  └─ frontend-to-backend.yaml
+│  └─ services/
+│     ├─ ns-allow-intra.yaml
+│     ├─ backend-to-db.yaml
+│     └─ db-restrict-egress.yaml
+└─ scripts/
+   └─ verify.sh
+
+
+# IMP points
+
+Global (cluster-wide) policies (allow essentials → deny all)
+Namespace-level base policies (intra-namespace, egress baseline)
+Service-specific policies (frontend → backend, backend → db, LB→web)
+DNS + kube-system permits you must not forget
+Step-by-step rollout + tests and rollback commands
+Validation checklist and automation hints
+
+
+# 1) Cluster-wide policies
+
+#global-allow-dns.yaml
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  order: 10
+  selector: all()
+  types:
+    - Egress
+  egress:
+    - action: Allow
+      protocol: UDP
+      destination:
+        ports:
+          - 53
+    - action: Allow
+      protocol: TCP
+      destination:
+        ports:
+          - 53
+---
+
+#global-allow-kube-system.yaml
+
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: allow-kube-system
+spec:
+  order: 20
+  selector: all()
+  types:
+    - Egress
+  egress:
+    - action: Allow
+      destination:
+        selector: kubernetes.io/cluster-service == "true" || k8s-app == 'kube-dns' || k8s-app == 'kube-proxy'
+---
+
+#global-allow-control-plane-to-nodes.yaml
+
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: allow-control-plane-to-nodes
+spec:
+  order: 30
+  selector: has(hostname) # nodes and pods on nodes
+  types:
+    - Ingress
+  ingress:
+    - action: Allow
+      source:
+        selector: has(role) && role == 'control-plane' # only if you label control-plane hosts; adjust to your env
+---
+
+#global-default-deny.yaml
+
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: global-default-deny
+spec:
+  order: 100
+  selector: all()
+  types:
+    - Ingress
+    - Egress
+  ingress:
+    - action: Deny
+  egress:
+    - action: Deny
+
+
+---------------------------------------------------------
+
+# 2) Namespace baseline policies
+
+# ns-base-allow-intra.yaml (apply in each app namespace)
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: ns-allow-intra
+  namespace: app
+spec:
+  selector: all()
+  types:
+    - Ingress
+    - Egress
+  ingress:
+    - action: Allow
+      source:
+        selector: all()
+  egress:
+    - action: Allow
+      destination:
+        selector: all()
+
+---
+
+# ns-allow-egress-to-apis.yaml (example allowing external APIs your app needs)
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: ns-allow-egress-apis
+  namespace: app
+spec:
+  selector: all()
+  types:
+    - Egress
+  egress:
+    - action: Allow
+      destination:
+        nets:
+          - 13.52.0.0/16  # example vendor CIDR — change per vendor
+        ports: [443]
+
+---------------------------------------------------------
+
+# 3) Service-level fine-grained policies- for microservices
+
+# frontend-allow-incoming-from-lb.yaml
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: frontend-allow-lb
+  namespace: web
+spec:
+  selector: app == 'frontend'
+  types:
+    - Ingress
+  ingress:
+    - action: Allow
+      source:
+        selector: kubernetes.io/service-name == 'aws-load-balancer-controller' # or selector for your ingress/ingress-controller
+      destination:
+        ports: [80,443]
+---
+
+# frontend-to-backend.yaml
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: frontend-to-backend
+  namespace: web
+spec:
+  selector: app == 'backend'
+  types:
+    - Ingress
+  ingress:
+    - action: Allow
+      protocol: TCP
+      source:
+        selector: app == 'frontend'
+      destination:
+        ports: [8080]
+---
+
+# backend-to-db.yaml
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: backend-to-db
+  namespace: services
+spec:
+  selector: app == 'db'        # DB pods selected
+  types:
+    - Ingress
+  ingress:
+    - action: Allow
+      protocol: TCP
+      source:
+        selector: app == 'backend'
+      destination:
+        ports: [5432]
+---
+
+# restrict-db-egress.yaml (DB should not have internet egress)
+
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: db-restrict-egress
+  namespace: services
+spec:
+  selector: app == 'db'
+  types:
+    - Egress
+  egress:
+    - action: Allow
+      destination:
+        selector: app == 'backup'  # allow backups if any
+    - action: Deny
+
+---------------------------------------------------------------------------------
+# 4)logging rule
+
+# log-denied.yaml
+
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: log-will-be-denied
+spec:
+  order: 90
+  selector: all()
+  types:
+    - Ingress
+    - Egress
+  ingress:
+    - action: Log
+  egress:
+    - action: Log
+
+
+---------------------------------------------------------------------------------
+# How to test connectivity and validate policies:
+
+DNS test:
+kubectl exec -n web $(kubectl get pod -n web -l app=frontend -o jsonpath='{.items[0].metadata.name}') -- nslookup kubernetes.default
+
+Backend port open:
+kubectl exec -n web -it $(kubectl get pod -n web -l app=frontend -o jsonpath='{.items[0].metadata.name}') -- sh -c "timeout 3 bash -c 'cat < /dev/tcp/backend-service.namespace.svc.cluster.local/8080' && echo OK || echo FAIL"
+
+DB connectivity from backend:
+kubectl exec -n services $(kubectl get pod -n services -l app=backend -o jsonpath='{.items[0].metadata.name}') -- sh -c "pg_isready -h db-service -p 5432"
+
+# Automated verification script:
+#!/bin/bash
+# quick verifier for critical flows
+set -e
+kubectl run --rm -i --tty test --image=radial/busyboxplus:curl --restart=Never -- nslookup kubernetes.default || { echo "DNS FAILED"; exit 1; }
+kubectl exec -it deploy/frontend -- sh -c "nc -zvw 3 backend 8080" || { echo "FRONTEND->BACKEND FAILED"; exit 1; }
+kubectl exec -it deploy/backend -- sh -c "nc -zvw 3 db 5432" || { echo "BACKEND->DB FAILED"; exit 1; }
+echo "All checks OK"
+
+---------------------------------------------------------------------------------
+# Rollback plan
+
+kubectl delete -f global-default-deny.yaml
+kubectl delete globalnetworkpolicy global-default-deny
+kubectl delete networkpolicy <name> -n <namespace>
+
+
+---------------------------------------------------------------------------------
+
+# Key points:
+
+Calico evaluates lower order first. Put allow rules at lower numbers (higher precedence) and default-deny at a higher number.
+Always allow DNS and kube-system control-plane traffic before tightening. Forgetting DNS is the most common catastrophic mistake.
+Label discipline is non-negotiable. Policies rely on selectors — if pods are unlabelled your policy does nothing or breaks everything.
+Test each change in a staging namespace with identical naming/labels before applying to prod.
+Use logging (action: Log) frequently during rollout to discover what will be denied.
+
+
+# Rollout plan
+
+1- Staging mirror
+Create a staging cluster or staging namespace replicating naming/labels of production. Apply all policies there and run tests. If you skip this, you’re gambling with production.
+
+2- Inventory & labeling (mandatory)
+kubectl get pods --all-namespaces -o wide --show-labels
+Fix missing labels. If pods lack labels, add them via Deployment manifests. Policies use labels not pod names.
+
+3- Baseline allows (low order)
+Apply allow-dns, allow-kube-system, allow-control-plane-to-nodes. Verify DNS and kube-system components work.
+Test DNS: kubectl run -it --rm --image=radial/busyboxplus:curl test-pod -- nslookup kubernetes.default (or dig @ if available).
+
+4- Add log rule
+Apply log-denied.yaml (order 90). Wait 5–10 minutes to collect logs. Inspect Calico logs or calicoctl diagnostics to see what would be denied.
+
+5- Namespace base policies
+Apply ns-allow-intra in each namespace. This keeps intra-namespace communication working while you build service rules.
+
+6- Service-level allowlists
+Apply service policies (frontend→backend, backend→db) in staging first. Run functional tests (integration, e2e).
+
+7- Monitor & iterate
+Use logs from step 4 to add missing allow rules. Repeat until logs show minimal denies.
+
+8- Apply global default deny
+Once logs are clean and tests pass in staging, apply global-default-deny (order 100) in production during low-traffic window.
+
+9- Post-enforcement validation
+Run a verification script across namespaces (examples below). If anything fails, rollback immediately (commands below).
+
+10- Remove logging rule after 24–48 hours of stable operations.
+
+
