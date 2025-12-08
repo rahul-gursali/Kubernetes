@@ -1,0 +1,81 @@
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass                         # decide EC2-Node-class
+metadata:
+  name: general-purpose
+spec:
+  amiFamily: AL2
+  subnetSelectorTerms:                     # deciding subnet 
+    - tags:
+        karpenter.sh/discovery: my-eks
+  securityGroupSelectorTerms:              # Security group
+    - tags:
+        karpenter.sh/discovery: my-eks
+  role: "arn:aws:iam::123456789012:role/KarpenterNodeRole"
+  tags:
+    Owner: "platform-team"
+    ManagedBy: "karpenter"
+  blockDeviceMappings:                    # ebs class
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50
+        volumeType: gp3
+        encrypted: true
+
+  detailedMonitoring: false
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required
+  instanceProfile: "KarpenterNodeInstanceProfile"
+
+
+  ----------------------------------------------------------------------------------------------------------
+
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool                    # NodePool for scheduling + capacity logic
+metadata:
+  name: general-purpose
+spec:
+  template:
+    metadata:
+      labels:
+        workload-tier: general
+    spec:
+      nodeClassRef:
+        name: general-purpose
+      requirements:
+        # CPU Arch
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Allowed instance families
+        - key: node.k8s.aws/instance-family
+          operator: In
+          values: ["m5", "m6i", "t3", "t4g"]
+
+        # Capacity type: Spot + On-Demand fallback
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+        # Zones to allow
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["ap-south-1a", "ap-south-1b", "ap-south-1c"]
+
+  limits:
+    cpu: "200"
+    memory: "800Gi"
+
+  # Consolidation aggressively repacks workloads
+  consolidation:
+    enabled: true
+
+  # Disruption policies
+  disruption:
+    consolidationPolicy: "WhenEmptyOrUnderutilized"
+    expireAfter: 720h   # Force refresh every 30 days
+
+  # Weighted scaling (optional)
+  weight: 20
+
